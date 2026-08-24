@@ -1,0 +1,133 @@
+(in-package #:grpc-backend-http2/tests)
+
+(defclass mock-http-backend (http-protocol:http-backend)
+  ((last-request :initarg :last-request :initform nil :accessor mock-last-request)
+   (response-status :initarg :response-status :initform 200 :accessor mock-response-status)
+   (response-headers :initarg :response-headers
+                     :initform (make-hash-table :test 'equal)
+                     :accessor mock-response-headers)
+   (response-body :initarg :response-body
+                  :initform (make-array 0 :element-type '(unsigned-byte 8))
+                  :accessor mock-response-body))
+  (:default-initargs :name "mock-grpc"))
+
+(defmethod http-protocol:backend-http-versions ((backend mock-http-backend))
+  (declare (ignore backend))
+  '(:http/1.1 :http/2))
+
+(defmethod http-protocol:send ((backend mock-http-backend) client request &key)
+  (declare (ignore client))
+  (setf (mock-last-request backend) request)
+  (make-instance 'http-protocol:http-response
+                 :status (mock-response-status backend)
+                 :headers (mock-response-headers backend)
+                 :body (mock-response-body backend)
+                 :http-version :http/2))
+
+(defun %ok-headers (&optional (status "0"))
+  (let ((ht (make-hash-table :test 'equal)))
+    (setf (gethash "grpc-status" ht) status
+          (gethash "content-type" ht) "application/grpc")
+    ht))
+
+(deftest backend-class
+  (ok (typep (grpc-backend-http2:make-http2-grpc-backend)
+             'grpc-backend-http2:http2-grpc-backend)))
+
+(deftest auto-selects-backend
+  (ok (typep grpc-protocol:*grpc-backend*
+             'grpc-backend-http2:http2-grpc-backend)))
+
+(deftest connect-tls-and-close
+  (let ((ch (grpc-protocol:grpc-connect "example.test:443" :credentials :ssl)))
+    (ok (typep ch 'grpc-backend-http2:http2-grpc-channel))
+    (ok (equal "example.test:443" (grpc-protocol:grpc-channel-target ch)))
+    (ok (eq :ssl (grpc-protocol:grpc-channel-credentials ch)))
+    (grpc-protocol:grpc-close ch)
+    (ok (grpc-protocol:grpc-channel-closed-p ch))
+    (ok (signals (grpc-protocol:grpc-call ch "/pkg.Svc/Ping" #())
+                 'grpc-protocol:grpc-error))))
+
+(deftest insecure-unimplemented
+  (ok (signals (grpc-protocol:grpc-connect "localhost:1" :credentials :insecure)
+               'grpc-protocol:grpc-error)))
+
+(deftest frame-unframe-roundtrip
+  (let* ((payload #(1 2 3 4 5))
+         (framed (grpc-backend-http2:frame-message payload)))
+    (ok (= 10 (length framed)))
+    (ok (zerop (aref framed 0)))
+    (ok (= 5 (aref framed 4)))
+    (multiple-value-bind (out compressed)
+        (grpc-backend-http2:unframe-message framed)
+      (ok (equalp payload out))
+      (ok (not compressed)))))
+
+(deftest unframe-empty
+  (multiple-value-bind (out compressed)
+      (grpc-backend-http2:unframe-message #())
+    (ok (zerop (length out)))
+    (ok (not compressed))))
+
+(deftest unframe-short-errors
+  (ok (signals (grpc-backend-http2:unframe-message #(0 0 0))
+               'grpc-protocol:grpc-error)))
+
+(deftest unframe-compressed-unimplemented
+  (let ((framed (grpc-backend-http2:frame-message #(1) t)))
+    (ok (signals (grpc-backend-http2:unframe-message framed)
+                 'grpc-protocol:grpc-error))))
+
+(deftest grpc-status-keyword-maps
+  (ok (eq :ok (grpc-backend-http2:grpc-status-keyword 0)))
+  (ok (eq :ok (grpc-backend-http2:grpc-status-keyword "0")))
+  (ok (eq :unimplemented (grpc-backend-http2:grpc-status-keyword 12)))
+  (ok (eq :unavailable (grpc-backend-http2:grpc-status-keyword "unavailable")))
+  (ok (eq :unknown (grpc-backend-http2:grpc-status-keyword 99))))
+
+(deftest format-grpc-timeout-units
+  (ok (equal "5S" (grpc-backend-http2:format-grpc-timeout 5)))
+  (ok (equal "1500m" (grpc-backend-http2:format-grpc-timeout 1.5)))
+  (ok (null (grpc-backend-http2:format-grpc-timeout nil))))
+
+(deftest unary-call-via-mock-http
+  (let* ((http (make-instance 'mock-http-backend
+                              :response-headers (%ok-headers)
+                              :response-body (grpc-backend-http2:frame-message #(9 8 7))))
+         (ch (grpc-protocol:grpc-connect
+              "example.test:443" :credentials :ssl
+              :metadata (list :http-backend http))))
+    (let ((out (grpc-protocol:grpc-call ch "/pkg.Svc/Ping" #(1 2 3)
+                                        :timeout 2)))
+      (ok (equalp #(9 8 7) out)))
+    (let ((req (mock-last-request http)))
+      (ok (eq :post (http-protocol:http-request-method req)))
+      (ok (equal "https://example.test:443/pkg.Svc/Ping"
+                 (http-protocol:http-request-url req)))
+      (ok (eq :http/2 (http-protocol:http-request-http-version req)))
+      (ok (equal "application/grpc"
+                 (cdr (assoc "content-type" (http-protocol:http-request-headers req)
+                             :test #'string-equal))))
+      (ok (equal "trailers"
+                 (cdr (assoc "te" (http-protocol:http-request-headers req)
+                             :test #'string-equal))))
+      (ok (equal "2S"
+                 (cdr (assoc "grpc-timeout" (http-protocol:http-request-headers req)
+                             :test #'string-equal))))
+      (ok (equalp (grpc-backend-http2:frame-message #(1 2 3))
+                  (http-protocol:http-request-content req))))))
+
+(deftest unary-maps-grpc-status
+  (let* ((http (make-instance 'mock-http-backend
+                              :response-headers (%ok-headers "14")
+                              :response-body #()))
+         (ch (grpc-protocol:grpc-connect
+              "example.test:443" :credentials :ssl
+              :metadata (list :http-backend http))))
+    (ok (signals (grpc-protocol:grpc-call ch "/pkg.Svc/Ping" #())
+                 'grpc-protocol:grpc-error))))
+
+(deftest stream-unimplemented
+  (let ((ch (grpc-protocol:grpc-connect "example.test:443" :credentials :ssl)))
+    (ok (signals (grpc-protocol:grpc-stream ch "/pkg.Svc/Watch")
+                 'grpc-protocol:grpc-error))))

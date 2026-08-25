@@ -4,6 +4,7 @@
   :author "egao1980"
   :license "MIT"
   :depends-on ("grpc-protocol" "http-protocol" "uiop")
+  :properties (:cl-repo (:ci (:with ("dissect") :sources (("dissect" :ql)))))
   :serial t
   :pathname "src"
   :components ((:file "package")

@@ -32,7 +32,7 @@ Wave-1:
 Do not load this together with `grpc-backend-native` unless you rebind
 `grpc-protocol:*grpc-backend*` — last load wins.
 
-CI: `setup-client` + `setup-roswell` + `scripts/ci-install.lisp` / `ci-test.lisp`
+CI: canned [`cl-repository`](https://github.com/egao1980/cl-repository) (`test-system.yml` / `setup-client` + `ci`). Deps from `ghcr.io/egao1980/cl-systems`.
 (OCI only). Unit tests use a mock HTTP backend — no live server.
 
 ## License

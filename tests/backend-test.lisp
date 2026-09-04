@@ -17,9 +17,7 @@
   (declare (ignore backend))
   '(:http/1.1 :http/2))
 
-(defmethod http-protocol:send ((backend mock-http-backend) client request &key)
-  (declare (ignore client))
-  (setf (mock-last-request backend) request)
+(defun %mock-response (backend)
   (let ((res (make-instance 'http-protocol:http-response
                             :status (mock-response-status backend)
                             :headers (mock-response-headers backend)
@@ -31,6 +29,30 @@
           (funcall (fdefinition `(setf ,writer))
                    (mock-response-trailers backend) res))))
     res))
+
+(defmethod http-protocol:send ((backend mock-http-backend) client request &key)
+  (declare (ignore client))
+  (setf (mock-last-request backend) request)
+  (%mock-response backend))
+
+(defmethod http-protocol:send-async ((backend mock-http-backend) client request
+                                     &key callback error-callback)
+  (declare (ignore client error-callback))
+  (setf (mock-last-request backend) request)
+  (when callback
+    (funcall callback (%mock-response backend)))
+  nil)
+
+(defun %slurp-request-pipe (req)
+  (let ((content (http-protocol:http-request-content req))
+        (close (find-symbol (string '#:close-body-pipe) :http-protocol))
+        (pipe-p (find-symbol (string '#:http-body-pipe-p) :http-protocol)))
+    (cond
+      ((and pipe-p (funcall pipe-p content))
+       (funcall close content)
+       (let ((buf (make-array 4096 :element-type '(unsigned-byte 8))))
+         (subseq buf 0 (read-sequence buf content))))
+      (t content))))
 
 (defun %ok-headers (&optional (status "0"))
   (let ((ht (make-hash-table :test 'equal)))
@@ -172,8 +194,8 @@
     (ok (equalp #(12) (grpc-protocol:grpc-recv s)))
     (ok (eq :eof (grpc-protocol:grpc-recv s)))
     (ok (http-protocol:http-request-want-stream (mock-last-request http)))
-    (ok (signals (grpc-protocol:grpc-send s #(1))
-                 'grpc-protocol:grpc-error))))
+    (ok (equalp (grpc-backend-http2:frame-message #(9))
+                (%slurp-request-pipe (mock-last-request http))))))
 
 (deftest bidi-send-then-recv
   (let* ((http (make-instance 'mock-http-backend
@@ -188,10 +210,23 @@
     (ok (equalp #(7) (grpc-protocol:grpc-recv s)))
     (ok (eq :eof (grpc-protocol:grpc-recv s)))
     (ok (equalp (grpc-backend-http2:concat-frames '(#(1) #(2)))
-                (http-protocol:http-request-content (mock-last-request http))))))
+                (%slurp-request-pipe (mock-last-request http))))))
 
-(deftest grpcio-parity-gated
-  "Live Lisp→grpcio. Gate with GRPC_PARITY_PEERS=1 (needs grpcio + TLS certs)."
-  (if (uiop:getenv "GRPC_PARITY_PEERS")
-      (skip "GRPC_PARITY_PEERS set — run parity/python/server.py + a TLS client separately")
-      (skip "GRPC_PARITY_PEERS unset")))
+(deftest bidi-send-after-recv
+  "Interleaved send after first recv (http-body-pipe, not queued flush)."
+  (let* ((http (make-instance 'mock-http-backend
+                              :response-headers (%ok-headers)
+                              :response-body (grpc-backend-http2:concat-frames
+                                              '(#(7) #(8)))))
+         (ch (grpc-protocol:grpc-connect
+              "example.test:443" :credentials :ssl
+              :metadata (list :http-backend http)))
+         (s (grpc-protocol:grpc-stream ch "/pkg.Svc/Chat")))
+    (grpc-protocol:grpc-send s #(1))
+    (ok (equalp #(7) (grpc-protocol:grpc-recv s)))
+    (ok (equalp #(2) (grpc-protocol:grpc-send s #(2))))
+    (ok (equalp #(8) (grpc-protocol:grpc-recv s)))
+    (grpc-protocol:grpc-send s nil :end t)
+    (ok (eq :eof (grpc-protocol:grpc-recv s)))
+    (ok (equalp (grpc-backend-http2:concat-frames '(#(1) #(2)))
+                (%slurp-request-pipe (mock-last-request http))))))

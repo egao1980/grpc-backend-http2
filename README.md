@@ -17,9 +17,12 @@ Part of [cl-stack](https://github.com/egao1980/cl-stack) agent-wire
     (grpc-protocol:grpc-close ch)))
 ```
 
-Wave-1:
+Wave-1 + streams (0.2.0):
 
-- Unary only. Streams signal `:unimplemented`.
+- Unary + **server-stream / bidi** (`grpc-stream` / `grpc-send` / `grpc-recv`).
+  Sends are queued and flushed on first `grpc-recv` (one POST + `:want-stream`).
+  Interleaved send-after-recv is `:failed-precondition` until request-body
+  streaming exists.
 - **TLS only.** `:insecure` / h2c is `:unimplemented` (`http-protocol` rejects
   `:http/2` on `http://`). Use [`grpc-backend-native`](https://github.com/egao1980/grpc-backend-native)
   for cleartext C-core on linux/darwin.

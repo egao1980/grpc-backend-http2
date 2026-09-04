@@ -59,6 +59,34 @@
                :message "truncated grpc frame"))
       (values (subseq buf 5 (+ 5 n)) nil))))
 
+(defun unframe-next (octets &key (start 0))
+  "Parse one gRPC frame from OCTETS at START.
+   Incomplete → (values nil start). Else (values payload next-index)."
+  (let ((buf (coerce octets '(vector (unsigned-byte 8))))
+        (end (length octets)))
+    (when (< (- end start) 5)
+      (return-from unframe-next (values nil start)))
+    (let* ((flag (aref buf start))
+           (n (+ (ash (aref buf (+ start 1)) 24)
+                 (ash (aref buf (+ start 2)) 16)
+                 (ash (aref buf (+ start 3)) 8)
+                 (aref buf (+ start 4)))))
+      (when (plusp (logand flag 1))
+        (error 'grpc-protocol:grpc-error
+               :status :unimplemented
+               :message "compressed grpc frames are not supported"))
+      (when (> (+ start 5 n) end)
+        (return-from unframe-next (values nil start)))
+      (values (subseq buf (+ start 5) (+ start 5 n))
+              (+ start 5 n)))))
+
+(defun concat-frames (payloads)
+  "Join PAYLOADS into one request body of gRPC frames."
+  (if (null payloads)
+      (make-array 0 :element-type '(unsigned-byte 8))
+      (apply #'concatenate '(vector (unsigned-byte 8))
+             (mapcar #'frame-message payloads))))
+
 (defun grpc-status-keyword (value)
   "Coerce a grpc-status header/trailer (integer, digit string, or name) to a keyword."
   (cond

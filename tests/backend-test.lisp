@@ -8,7 +8,9 @@
                      :accessor mock-response-headers)
    (response-body :initarg :response-body
                   :initform (make-array 0 :element-type '(unsigned-byte 8))
-                  :accessor mock-response-body))
+                  :accessor mock-response-body)
+   (response-trailers :initarg :response-trailers :initform nil
+                      :accessor mock-response-trailers))
   (:default-initargs :name "mock-grpc"))
 
 (defmethod http-protocol:backend-http-versions ((backend mock-http-backend))
@@ -18,11 +20,17 @@
 (defmethod http-protocol:send ((backend mock-http-backend) client request &key)
   (declare (ignore client))
   (setf (mock-last-request backend) request)
-  (make-instance 'http-protocol:http-response
-                 :status (mock-response-status backend)
-                 :headers (mock-response-headers backend)
-                 :body (mock-response-body backend)
-                 :http-version :http/2))
+  (let ((res (make-instance 'http-protocol:http-response
+                            :status (mock-response-status backend)
+                            :headers (mock-response-headers backend)
+                            :body (mock-response-body backend)
+                            :http-version :http/2)))
+    (when (mock-response-trailers backend)
+      (let ((writer (find-symbol (string '#:response-trailers) :http-protocol)))
+        (when (and writer (fboundp writer))
+          (funcall (fdefinition `(setf ,writer))
+                   (mock-response-trailers backend) res))))
+    res))
 
 (defun %ok-headers (&optional (status "0"))
   (let ((ht (make-hash-table :test 'equal)))
@@ -127,7 +135,63 @@
     (ok (signals (grpc-protocol:grpc-call ch "/pkg.Svc/Ping" #())
                  'grpc-protocol:grpc-error))))
 
-(deftest stream-unimplemented
-  (let ((ch (grpc-protocol:grpc-connect "example.test:443" :credentials :ssl)))
-    (ok (signals (grpc-protocol:grpc-stream ch "/pkg.Svc/Watch")
+(deftest unary-status-from-trailers
+  (let* ((tr (%ok-headers "0"))
+         (http (make-instance 'mock-http-backend
+                              :response-headers (make-hash-table :test 'equal)
+                              :response-trailers tr
+                              :response-body (grpc-backend-http2:frame-message #(1))))
+         (ch (grpc-protocol:grpc-connect
+              "example.test:443" :credentials :ssl
+              :metadata (list :http-backend http))))
+    (if (find-symbol (string '#:response-trailers) :http-protocol)
+        (ok (equalp #(1) (grpc-protocol:grpc-call ch "/pkg.Svc/Ping" #())))
+        (skip "http-protocol has no response-trailers"))))
+
+(deftest unframe-next-two-frames
+  (let ((body (grpc-backend-http2:concat-frames '(#(1 2) #(3)))))
+    (multiple-value-bind (a i) (grpc-backend-http2:unframe-next body)
+      (ok (equalp #(1 2) a))
+      (multiple-value-bind (b j) (grpc-backend-http2:unframe-next body :start i)
+        (ok (equalp #(3) b))
+        (ok (null (grpc-backend-http2:unframe-next body :start j)))))))
+
+(deftest server-stream-via-mock
+  (let* ((http (make-instance 'mock-http-backend
+                              :response-headers (%ok-headers)
+                              :response-body (grpc-backend-http2:concat-frames
+                                              '(#(10) #(11) #(12)))))
+         (ch (grpc-protocol:grpc-connect
+              "example.test:443" :credentials :ssl
+              :metadata (list :http-backend http)))
+         (s (grpc-protocol:grpc-stream ch "/pkg.Svc/Watch")))
+    (ok (typep s 'grpc-backend-http2:http2-grpc-stream))
+    (grpc-protocol:grpc-send s #(9))
+    (ok (equalp #(10) (grpc-protocol:grpc-recv s)))
+    (ok (equalp #(11) (grpc-protocol:grpc-recv s)))
+    (ok (equalp #(12) (grpc-protocol:grpc-recv s)))
+    (ok (eq :eof (grpc-protocol:grpc-recv s)))
+    (ok (http-protocol:http-request-want-stream (mock-last-request http)))
+    (ok (signals (grpc-protocol:grpc-send s #(1))
                  'grpc-protocol:grpc-error))))
+
+(deftest bidi-send-then-recv
+  (let* ((http (make-instance 'mock-http-backend
+                              :response-headers (%ok-headers)
+                              :response-body (grpc-backend-http2:frame-message #(7))))
+         (ch (grpc-protocol:grpc-connect
+              "example.test:443" :credentials :ssl
+              :metadata (list :http-backend http)))
+         (s (grpc-protocol:grpc-stream ch "/pkg.Svc/Chat")))
+    (grpc-protocol:grpc-send s #(1))
+    (grpc-protocol:grpc-send s #(2))
+    (ok (equalp #(7) (grpc-protocol:grpc-recv s)))
+    (ok (eq :eof (grpc-protocol:grpc-recv s)))
+    (ok (equalp (grpc-backend-http2:concat-frames '(#(1) #(2)))
+                (http-protocol:http-request-content (mock-last-request http))))))
+
+(deftest grpcio-parity-gated
+  "Live Lisp→grpcio. Gate with GRPC_PARITY_PEERS=1 (needs grpcio + TLS certs)."
+  (if (uiop:getenv "GRPC_PARITY_PEERS")
+      (skip "GRPC_PARITY_PEERS set — run parity/python/server.py + a TLS client separately")
+      (skip "GRPC_PARITY_PEERS unset")))

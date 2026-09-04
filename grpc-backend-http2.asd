@@ -1,6 +1,6 @@
 (defsystem "grpc-backend-http2"
-  :version "0.1.0"
-  :description "HTTP/2 (http-protocol) backend for grpc-protocol — Windows-safe unary"
+  :version "0.2.0"
+  :description "HTTP/2 (http-protocol) backend for grpc-protocol — unary + server/bidi streams"
   :author "egao1980"
   :license "MIT"
   :depends-on ("grpc-protocol" "http-protocol" "uiop")

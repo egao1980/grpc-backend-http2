@@ -7,6 +7,8 @@
            #:use-http2-grpc-backend
            #:frame-message
            #:unframe-message
+           #:unframe-next
+           #:concat-frames
            #:grpc-status-keyword
            #:format-grpc-timeout))
 

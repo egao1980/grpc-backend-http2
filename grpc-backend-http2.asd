@@ -1,16 +1,18 @@
 (defsystem "grpc-backend-http2"
-  :version "0.3.0"
-  :description "HTTP/2 (http-protocol) backend for grpc-protocol — unary + interleaved bidi"
+  :version "0.3.1"
+  :description "HTTP/2 (http-protocol) backend for grpc-protocol — unary + interleaved bidi + gzip/deflate frames"
   :author "egao1980"
   :license "MIT"
   :depends-on ("grpc-protocol"
                (:version "http-protocol" "0.3.6")
+               "chipz" "salza2"
                "bordeaux-threads" "uiop")
   :properties (:cl-repo (:ci (:with ("dissect"))))
   :serial t
   :pathname "src"
   :components ((:file "package")
                (:file "framing")
+               (:file "compression")
                (:file "backend"))
   :in-order-to ((test-op (test-op "grpc-backend-http2/tests"))))
 

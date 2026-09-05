@@ -103,10 +103,29 @@
   (ok (signals (grpc-backend-http2:unframe-message #(0 0 0))
                'grpc-protocol:grpc-error)))
 
-(deftest unframe-compressed-unimplemented
+(deftest unframe-compressed-flag
   (let ((framed (grpc-backend-http2:frame-message #(1) t)))
-    (ok (signals (grpc-backend-http2:unframe-message framed)
-                 'grpc-protocol:grpc-error))))
+    (multiple-value-bind (out compressed)
+        (grpc-backend-http2:unframe-message framed)
+      (ok (equalp #(1) out))
+      (ok compressed))))
+
+(deftest gzip-deflate-roundtrip
+  (dolist (algo '(:gzip :deflate))
+    (dolist (payload '(#() #(1 2 3 4 5) #(0 0 0 0)))
+      (let* ((raw (coerce payload '(vector (unsigned-byte 8))))
+             (c (grpc-backend-http2:compress-payload algo raw))
+             (back (grpc-backend-http2:decompress-payload algo c)))
+        (ok (equalp raw back)
+            (format nil "~A ~S" algo payload))))))
+
+(defun %hdr (req name)
+  (cdr (assoc name (http-protocol:http-request-headers req) :test #'string-equal)))
+
+(defun %gzip-headers ()
+  (let ((ht (%ok-headers)))
+    (setf (gethash "grpc-encoding" ht) "gzip")
+    ht))
 
 (deftest grpc-status-keyword-maps
   (ok (eq :ok (grpc-backend-http2:grpc-status-keyword 0)))
@@ -141,11 +160,85 @@
       (ok (equal "trailers"
                  (cdr (assoc "te" (http-protocol:http-request-headers req)
                              :test #'string-equal))))
-      (ok (equal "2S"
-                 (cdr (assoc "grpc-timeout" (http-protocol:http-request-headers req)
-                             :test #'string-equal))))
+      (ok (equal "2S" (%hdr req "grpc-timeout")))
+      (ok (equal "identity,gzip,deflate" (%hdr req "grpc-accept-encoding")))
+      (ok (null (%hdr req "grpc-encoding")))
       (ok (equalp (grpc-backend-http2:frame-message #(1 2 3))
                   (http-protocol:http-request-content req))))))
+
+(deftest unary-gzip-request-and-response
+  (let* ((plain #(9 8 7))
+         (gz (grpc-backend-http2:compress-payload :gzip plain))
+         (http (make-instance 'mock-http-backend
+                              :response-headers (%gzip-headers)
+                              :response-body (grpc-backend-http2:frame-message gz t)))
+         (ch (grpc-protocol:grpc-connect
+              "example.test:443" :credentials :ssl
+              :metadata (list :http-backend http :compression :gzip))))
+    (ok (equalp plain (grpc-protocol:grpc-call ch "/pkg.Svc/Ping" #(1 2 3))))
+    (let ((req (mock-last-request http)))
+      (ok (equal "gzip" (%hdr req "grpc-encoding")))
+      (ok (equal "identity,gzip,deflate" (%hdr req "grpc-accept-encoding")))
+      (ok (null (%hdr req "compression")))
+      (ok (equalp (grpc-backend-http2:frame-message
+                   (grpc-backend-http2:compress-payload :gzip #(1 2 3)) t)
+                  (http-protocol:http-request-content req))))))
+
+(deftest unary-compressed-without-encoding-errors
+  (let* ((gz (grpc-backend-http2:compress-payload :gzip #(1)))
+         (http (make-instance 'mock-http-backend
+                              :response-headers (%ok-headers)
+                              :response-body (grpc-backend-http2:frame-message gz t)))
+         (ch (grpc-protocol:grpc-connect
+              "example.test:443" :credentials :ssl
+              :metadata (list :http-backend http))))
+    (ok (signals (grpc-protocol:grpc-call ch "/pkg.Svc/Ping" #())
+                 'grpc-protocol:grpc-error))))
+
+(deftest unary-unknown-encoding-errors
+  (let* ((headers (%ok-headers))
+         (gz (grpc-backend-http2:compress-payload :gzip #(1))))
+    (setf (gethash "grpc-encoding" headers) "br")
+    (let* ((http (make-instance 'mock-http-backend
+                                :response-headers headers
+                                :response-body (grpc-backend-http2:frame-message gz t)))
+           (ch (grpc-protocol:grpc-connect
+                "example.test:443" :credentials :ssl
+                :metadata (list :http-backend http))))
+      (ok (signals (grpc-protocol:grpc-call ch "/pkg.Svc/Ping" #())
+                   'grpc-protocol:grpc-error)))))
+
+(deftest unary-unsupported-request-compression
+  (let* ((http (make-instance 'mock-http-backend
+                              :response-headers (%ok-headers)
+                              :response-body (grpc-backend-http2:frame-message #(1))))
+         (ch (grpc-protocol:grpc-connect
+              "example.test:443" :credentials :ssl
+              :metadata (list :http-backend http :compression :br))))
+    (ok (signals (grpc-protocol:grpc-call ch "/pkg.Svc/Ping" #(1))
+                 'grpc-protocol:grpc-error))))
+
+(deftest stream-gzip-via-mock
+  (let* ((a (grpc-backend-http2:compress-payload :gzip #(10)))
+         (b (grpc-backend-http2:compress-payload :gzip #(11)))
+         (http (make-instance 'mock-http-backend
+                              :response-headers (%gzip-headers)
+                              :response-body (concatenate
+                                              '(vector (unsigned-byte 8))
+                                              (grpc-backend-http2:frame-message a t)
+                                              (grpc-backend-http2:frame-message b t))))
+         (ch (grpc-protocol:grpc-connect
+              "example.test:443" :credentials :ssl
+              :metadata (list :http-backend http :compression :gzip)))
+         (s (grpc-protocol:grpc-stream ch "/pkg.Svc/Watch")))
+    (grpc-protocol:grpc-send s #(9))
+    (ok (equalp #(10) (grpc-protocol:grpc-recv s)))
+    (ok (equalp #(11) (grpc-protocol:grpc-recv s)))
+    (ok (eq :eof (grpc-protocol:grpc-recv s)))
+    (ok (equal "gzip" (%hdr (mock-last-request http) "grpc-encoding")))
+    (ok (equalp (grpc-backend-http2:frame-message
+                 (grpc-backend-http2:compress-payload :gzip #(9)) t)
+                (%slurp-request-pipe (mock-last-request http))))))
 
 (deftest unary-maps-grpc-status
   (let* ((http (make-instance 'mock-http-backend

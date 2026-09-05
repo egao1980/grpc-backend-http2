@@ -2,7 +2,7 @@
 
 ;;; Length-prefixed gRPC-over-HTTP/2 frame (gRPC HTTP/2 spec).
 ;;;   1-byte compressed-flag | 4-byte big-endian length | message octets
-;;; Wave-1: uncompressed only (flag 0).
+;;; Flag 1 = payload is grpc-encoding compressed (gzip/deflate).
 
 (defparameter *grpc-status-names*
   #(:ok :cancelled :unknown :invalid-argument :deadline-exceeded
@@ -12,7 +12,7 @@
   "grpc-status wire integers 0..16 → keywords (no :grpc-status- prefix).")
 
 (defun frame-message (octets &optional compressed)
-  "Wrap OCTETS in a 5-byte gRPC prefix. COMPRESSED non-nil sets flag 1 (not decoded)."
+  "Wrap OCTETS in a 5-byte gRPC prefix. COMPRESSED non-nil sets flag 1."
   (let* ((payload (coerce octets '(vector (unsigned-byte 8))))
          (n (length payload))
          (out (make-array (+ 5 n) :element-type '(unsigned-byte 8))))
@@ -26,7 +26,7 @@
 
 (defun unframe-message (octets)
   "Return (values payload compressed-p) from a single gRPC frame.
-   Empty/missing body → empty payload. Compressed frames signal :unimplemented."
+   Empty/missing body → empty payload. Does not decompress."
   (let ((buf (cond
                ((null octets)
                 (make-array 0 :element-type '(unsigned-byte 8)))
@@ -49,19 +49,15 @@
                  (ash (aref buf 3) 8)
                  (aref buf 4)))
            (compressed (plusp (logand flag 1))))
-      (when compressed
-        (error 'grpc-protocol:grpc-error
-               :status :unimplemented
-               :message "compressed grpc frames are not supported"))
       (when (> (+ 5 n) (length buf))
         (error 'grpc-protocol:grpc-error
                :status :internal
                :message "truncated grpc frame"))
-      (values (subseq buf 5 (+ 5 n)) nil))))
+      (values (subseq buf 5 (+ 5 n)) compressed))))
 
 (defun unframe-next (octets &key (start 0))
   "Parse one gRPC frame from OCTETS at START.
-   Incomplete → (values nil start). Else (values payload next-index)."
+   Incomplete → (values nil start). Else (values payload next-index compressed-p)."
   (let ((buf (coerce octets '(vector (unsigned-byte 8))))
         (end (length octets)))
     (when (< (- end start) 5)
@@ -70,15 +66,13 @@
            (n (+ (ash (aref buf (+ start 1)) 24)
                  (ash (aref buf (+ start 2)) 16)
                  (ash (aref buf (+ start 3)) 8)
-                 (aref buf (+ start 4)))))
-      (when (plusp (logand flag 1))
-        (error 'grpc-protocol:grpc-error
-               :status :unimplemented
-               :message "compressed grpc frames are not supported"))
+                 (aref buf (+ start 4))))
+           (compressed (plusp (logand flag 1))))
       (when (> (+ start 5 n) end)
         (return-from unframe-next (values nil start)))
       (values (subseq buf (+ start 5) (+ start 5 n))
-              (+ start 5 n)))))
+              (+ start 5 n)
+              compressed))))
 
 (defun concat-frames (payloads)
   "Join PAYLOADS into one request body of gRPC frames."

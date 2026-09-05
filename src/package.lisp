@@ -15,6 +15,8 @@
            #:unframe-message
            #:unframe-next
            #:concat-frames
+           #:compress-payload
+           #:decompress-payload
            #:grpc-status-keyword
            #:format-grpc-timeout))
 

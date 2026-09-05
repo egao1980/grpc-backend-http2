@@ -9,8 +9,10 @@
 ;;; HTTP2-GRPC-STREAM is defined with stream slots below.
 
 (defparameter *internal-metadata-keys*
-  '(:response-class :http-backend :http-client)
+  '(:response-class :http-backend :http-client :compression)
   "Metadata keys consumed here — not sent as gRPC headers.")
+
+(defparameter *grpc-accept-encoding* "identity,gzip,deflate")
 
 (defun make-http2-grpc-backend ()
   (make-instance 'http2-grpc-backend))
@@ -57,16 +59,50 @@
         unless (member k *internal-metadata-keys* :test #'eq)
           collect (cons (string-downcase (string k)) (princ-to-string v))))
 
-(defun %grpc-request-headers (metadata timeout)
+(defun %channel-compression (channel)
+  (let ((fn (find-symbol "GRPC-CHANNEL-COMPRESSION" :grpc-protocol)))
+    (when (and fn (fboundp fn))
+      (funcall fn channel))))
+
+(defun %request-compression (channel metadata)
+  (normalize-compression
+   (or (getf metadata :compression)
+       (getf (grpc-protocol:grpc-channel-metadata channel) :compression)
+       (%channel-compression channel))))
+
+(defun %grpc-request-headers (metadata timeout &key compression)
   (let ((hdrs (append
-               '(("content-type" . "application/grpc")
+               `(("content-type" . "application/grpc")
                  ("te" . "trailers")
-                 ("user-agent" . "grpc-lisp/grpc-backend-http2"))
+                 ("user-agent" . "grpc-lisp/grpc-backend-http2")
+                 ("grpc-accept-encoding" . ,*grpc-accept-encoding*))
+               (when compression
+                 (list (cons "grpc-encoding"
+                             (string-downcase (symbol-name compression)))))
                (%metadata-headers metadata)))
         (to (format-grpc-timeout timeout)))
     (if to
         (cons (cons "grpc-timeout" to) hdrs)
         hdrs)))
+
+(defun %frame-request (octets compression)
+  (if compression
+      (frame-message (compress-payload compression octets) t)
+      (frame-message octets)))
+
+(defun %response-encoding (res)
+  (parse-grpc-encoding (%header (http-protocol:response-headers res) "grpc-encoding")))
+
+(defun %unframe-response (octets encoding)
+  (multiple-value-bind (payload compressed-p)
+      (unframe-message octets)
+    (cond
+      ((not compressed-p) payload)
+      ((or (null encoding) (eq encoding :identity))
+       (error 'grpc-protocol:grpc-error
+              :status :internal
+              :message "compressed grpc frame without grpc-encoding"))
+      (t (decompress-payload encoding payload)))))
 
 (defun %ensure-http-backend (channel)
   (or (http2-channel-http-backend channel)
@@ -145,14 +181,15 @@
            :status :failed-precondition
            :message "channel is closed"))
   (let* ((merged (append metadata (grpc-protocol:grpc-channel-metadata channel)))
+         (compression (%request-compression channel merged))
          (http (%ensure-http-backend channel))
          (client (%ensure-http-client channel http))
          (url (%call-url channel method))
-         (framed (frame-message (%message-octets request)))
+         (framed (%frame-request (%message-octets request) compression))
          (req (http-protocol:make-http-request
                :method :post
                :url url
-               :headers (%grpc-request-headers merged timeout)
+               :headers (%grpc-request-headers merged timeout :compression compression)
                :content framed
                :http-version :http/2
                :force-binary t
@@ -171,12 +208,12 @@
                           (format nil "grpc-status ~A (HTTP ~A)"
                                   status (http-protocol:response-status res)))
              :details res))
-    (multiple-value-bind (octets)
-        (unframe-message (%response-octets (http-protocol:response-body res)))
-      (let ((class (getf merged :response-class)))
-        (if class
-            (%decode octets class)
-            octets)))))
+    (let ((octets (%unframe-response (%response-octets (http-protocol:response-body res))
+                                     (%response-encoding res)))
+          (class (getf merged :response-class)))
+      (if class
+          (%decode octets class)
+          octets))))
 
 (defclass http2-grpc-stream (grpc-protocol:grpc-stream)
   ((url :initarg :url :accessor http2-stream-url)
@@ -251,10 +288,18 @@
       (setf (http2-stream-request-pipe stream)
             (funcall (%pipe-sym '#:make-http-body-pipe)))))
 
+(defun %stream-request-compression (stream)
+  (%request-compression (grpc-protocol:grpc-stream-channel stream)
+                        (http2-stream-metadata stream)))
+
+(defun %stream-response-encoding (stream)
+  (let ((res (http2-stream-response stream)))
+    (and res (%response-encoding res))))
+
 (defun %write-pipe-frame (stream octets)
   (funcall (%pipe-sym '#:write-body-pipe)
            (%ensure-pipe stream)
-           (frame-message octets)))
+           (%frame-request octets (%stream-request-compression stream))))
 
 (defun %half-close (stream)
   (unless (http2-stream-half-closed-p stream)
@@ -352,7 +397,9 @@
                    :method :post
                    :url (http2-stream-url stream)
                    :headers (%grpc-request-headers (http2-stream-metadata stream)
-                                                   (http2-stream-timeout stream))
+                                                   (http2-stream-timeout stream)
+                                                   :compression
+                                                   (%stream-request-compression stream))
                    :content pipe
                    :http-version :http/2
                    :want-stream t
@@ -386,8 +433,18 @@
     (%raise-if-bad-status res)
     stream))
 
+(defun %decode-frame-payload (payload compressed-p encoding)
+  (cond
+    ((not compressed-p) payload)
+    ((or (null encoding) (eq encoding :identity))
+     (error 'grpc-protocol:grpc-error
+            :status :internal
+            :message "compressed grpc frame without grpc-encoding"))
+    (t (decompress-payload encoding payload))))
+
 (defun %read-one-frame (stream)
-  (let ((body (http2-stream-body stream)))
+  (let ((body (http2-stream-body stream))
+        (encoding (%stream-response-encoding stream)))
     (cond
       ((null body)
        :eof)
@@ -401,11 +458,8 @@
                      :status :internal
                      :message "short grpc frame header"))
              (t
-              (when (plusp (logand (aref hdr 0) 1))
-                (error 'grpc-protocol:grpc-error
-                       :status :unimplemented
-                       :message "compressed grpc frames are not supported"))
-              (let* ((len (+ (ash (aref hdr 1) 24)
+              (let* ((compressed (plusp (logand (aref hdr 0) 1)))
+                     (len (+ (ash (aref hdr 1) 24)
                              (ash (aref hdr 2) 16)
                              (ash (aref hdr 3) 8)
                              (aref hdr 4)))
@@ -414,9 +468,9 @@
                   (error 'grpc-protocol:grpc-error
                          :status :internal
                          :message "truncated grpc frame"))
-                payload))))))
+                (%decode-frame-payload payload compressed encoding)))))))
       (t
-       (multiple-value-bind (payload next)
+       (multiple-value-bind (payload next compressed-p)
            (unframe-next body :start (http2-stream-body-pos stream))
          (cond
            ((null payload)
@@ -427,7 +481,7 @@
                        :message "truncated grpc frame")))
            (t
             (setf (http2-stream-body-pos stream) next)
-            payload)))))))
+            (%decode-frame-payload payload compressed-p encoding))))))))
 
 (defmethod grpc-protocol:grpc-send ((stream http2-grpc-stream) message &key end)
   (when (or (grpc-protocol:grpc-stream-closed-p stream)

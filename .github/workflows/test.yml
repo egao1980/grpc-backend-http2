@@ -39,7 +39,14 @@ jobs:
           python-version: "3.12"
 
       - name: Install grpcio
-        run: uv pip install --system grpcio grpcio-tools
+        run: |
+          uv venv "$GITHUB_WORKSPACE/.grpc-venv"
+          PY="$GITHUB_WORKSPACE/.grpc-venv/bin/python"
+          if [ ! -x "$PY" ]; then
+            PY="$GITHUB_WORKSPACE/.grpc-venv/Scripts/python.exe"
+          fi
+          uv pip install --python "$PY" grpcio grpcio-tools
+          echo "GRPC_PARITY_PYTHON=$PY" >> "$GITHUB_ENV"
 
       - uses: egao1980/cl-repository/.github/actions/setup-lisp@main
         with:
@@ -49,7 +56,7 @@ jobs:
       - uses: egao1980/cl-repository/.github/actions/ci@main
         with:
           phase: install
-          with: http-backend-async event-backend-libuv cl-stack-ssl http2/client
+          with: http-backend-async event-backend-libuv cl-stack-ssl http2 http2/client
 
       - uses: egao1980/cl-repository/.github/actions/ci@main
         with:

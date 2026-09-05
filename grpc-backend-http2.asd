@@ -3,7 +3,9 @@
   :description "HTTP/2 (http-protocol) backend for grpc-protocol — unary + interleaved bidi"
   :author "egao1980"
   :license "MIT"
-  :depends-on ("grpc-protocol" "http-protocol" "bordeaux-threads" "uiop")
+  :depends-on ("grpc-protocol"
+               (:version "http-protocol" "0.3.6")
+               "bordeaux-threads" "uiop")
   :properties (:cl-repo (:ci (:with ("dissect"))))
   :serial t
   :pathname "src"

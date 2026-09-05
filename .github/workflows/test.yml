@@ -7,6 +7,57 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   test:
     uses: egao1980/cl-repository/.github/workflows/test-system.yml@main
+
+  grpcio:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    container: ${{ startsWith(matrix.os, 'ubuntu') && 'ghcr.io/egao1980/cl-repository/ci-base:latest' || fromJSON('null') }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      SBCL_VERSION: 2.6.7
+      ROSWELL_VERSION: "26.02.116"
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GRPC_PARITY_PEERS: "1"
+      HTTP_ASYNC_EVENT_BACKEND: libuv
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install grpcio
+        run: |
+          uv venv "$GITHUB_WORKSPACE/.grpc-venv"
+          PY="$GITHUB_WORKSPACE/.grpc-venv/bin/python"
+          if [ ! -x "$PY" ]; then
+            PY="$GITHUB_WORKSPACE/.grpc-venv/Scripts/python.exe"
+          fi
+          uv pip install --python "$PY" grpcio grpcio-tools
+          echo "GRPC_PARITY_PYTHON=$PY" >> "$GITHUB_ENV"
+
+      - uses: egao1980/cl-repository/.github/actions/setup-lisp@main
+        with:
+          sbcl-version: ${{ env.SBCL_VERSION }}
+          roswell-version: ${{ env.ROSWELL_VERSION }}
+
+      - uses: egao1980/cl-repository/.github/actions/ci@main
+        with:
+          phase: install
+          with: http-backend-async event-backend-libuv cl-stack-ssl http2 http2/client
+
+      - uses: egao1980/cl-repository/.github/actions/ci@main
+        with:
+          phase: test

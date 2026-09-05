@@ -1,5 +1,11 @@
 (defpackage #:grpc-backend-http2
   (:use #:cl)
+  (:import-from #:bordeaux-threads
+                #:make-lock
+                #:make-thread
+                #:thread-alive-p
+                #:join-thread
+                #:with-lock-held)
   (:export #:http2-grpc-backend
            #:http2-grpc-channel
            #:http2-grpc-stream

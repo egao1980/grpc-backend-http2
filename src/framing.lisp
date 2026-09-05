@@ -12,7 +12,7 @@
   "grpc-status wire integers 0..16 → keywords (no :grpc-status- prefix).")
 
 (defun frame-message (octets &optional compressed)
-  "Wrap OCTETS in a 5-byte gRPC prefix. COMPRESSED non-nil sets flag 1.")
+  "Wrap OCTETS in a 5-byte gRPC prefix. COMPRESSED non-nil sets flag 1."
   (let* ((payload (coerce octets '(vector (unsigned-byte 8))))
          (n (length payload))
          (out (make-array (+ 5 n) :element-type '(unsigned-byte 8))))

@@ -5,7 +5,7 @@
   :license "MIT"
   :depends-on ("grpc-protocol"
                (:version "http-protocol" "0.3.6")
-               "chipz" "salza2"
+               "http-encoding-chipz"
                "bordeaux-threads" "uiop")
   :properties (:cl-repo (:ci (:with ("dissect"))))
   :serial t

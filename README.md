@@ -23,8 +23,9 @@ Part of [cl-stack](https://github.com/egao1980/cl-stack) agent-wire
 - **Compressed frames:** `:compression :gzip` / `:deflate` on `grpc-connect` /
   `grpc-call` / `grpc-stream` (or metadata `:compression`). Sets `grpc-encoding`
   and frame flag 1. Always sends `grpc-accept-encoding: identity,gzip,deflate`
-  and decompresses inbound flag-1 frames. Codecs = chipz + salza2. **Not** HTTP
-  `Content-Encoding` (`:accept-encoding nil :decompress nil` still).
+  and decompresses inbound flag-1 frames via
+  `http-protocol:encode/decode-content-coding` (`http-encoding-chipz`).
+  **Not** HTTP `Content-Encoding` (`:accept-encoding nil :decompress nil` still).
 - Unary + **server-stream / bidi**. Request body is an `http-body-pipe`;
   `grpc-send` writes DATA after the POST is open (`send-async`, not blocking
   `send` — that slurps `:want-stream`).

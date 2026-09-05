@@ -1,72 +1,58 @@
 (in-package #:grpc-backend-http2)
 
-;;; Message codecs for grpc-encoding (NOT HTTP Content-Encoding).
-;;; Same chipz/salza2 pairing as http-encoding-chipz.
-
-;; salza2 mis-encodes zero-length input; use canonical empties.
-(defparameter *empty-gzip*
-  (coerce #(#x1f #x8b #x08 #x00 #x00 #x00 #x00 #x00 #x00 #xff
-            #x03 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00)
-          '(simple-array (unsigned-byte 8) (*))))
-
-(defparameter *empty-zlib*
-  (coerce #(#x78 #x9c #x03 #x00 #x00 #x00 #x00 #x01)
-          '(simple-array (unsigned-byte 8) (*))))
-
-(defun %as-octets (octets)
-  (coerce octets '(simple-array (unsigned-byte 8) (*))))
+;;; grpc-encoding codecs = http-protocol content-coding (http-encoding-chipz).
+;;; Wire is still gRPC message compression, not HTTP Content-Encoding.
 
 (defun normalize-compression (value)
-  "NIL / :identity / :none → NIL; :gzip / :deflate stay; else signal."
+  "NIL / :identity / :none → NIL; else a content-coding keyword (or signal)."
   (cond
-    ((null value) nil)
-    ((member value '(:identity :none) :test #'eq) nil)
-    ((member value '(:gzip :deflate) :test #'eq) value)
-    ((stringp value)
-     (normalize-compression (intern (string-upcase value) :keyword)))
+    ((or (null value) (eq value :none)) nil)
     (t
-     (error 'grpc-protocol:grpc-error
-            :status :unimplemented
-            :message (format nil "unsupported grpc compression ~S" value)))))
+     (let ((c (http-protocol:normalize-content-coding value)))
+       (cond
+         ((or (null c) (eq c :identity)) nil)
+         ((http-protocol:content-coding-supported-p c) c)
+         (t
+          (error 'grpc-protocol:grpc-error
+                 :status :unimplemented
+                 :message (format nil "unsupported grpc compression ~S" value))))))))
 
 (defun parse-grpc-encoding (value)
-  "Header value → :gzip / :deflate / :identity / NIL. Unknown → string."
-  (when value
-    (let* ((raw (if (consp value) (car value) value))
-           (s (string-downcase (string-trim '(#\Space #\Tab) (princ-to-string raw)))))
-      (cond
-        ((string= s "") nil)
-        ((string= s "identity") :identity)
-        ((string= s "gzip") :gzip)
-        ((string= s "deflate") :deflate)
-        (t s)))))
+  "grpc-encoding header → content-coding keyword or NIL."
+  (http-protocol:normalize-content-coding
+   (if (consp value) (car value) value)))
+
+(defun %as-octets (octets)
+  (if (and (vectorp octets) (not (stringp octets)))
+      (coerce octets '(simple-array (unsigned-byte 8) (*)))
+      octets))
 
 (defun compress-payload (algorithm octets)
   (let ((algo (normalize-compression algorithm))
         (buf (%as-octets octets)))
-    (ecase algo
-      ((nil) buf)
-      (:gzip (if (zerop (length buf))
-                 *empty-gzip*
-                 (salza2:compress-data buf 'salza2:gzip-compressor)))
-      (:deflate (if (zerop (length buf))
-                    *empty-zlib*
-                    (salza2:compress-data buf 'salza2:zlib-compressor))))))
+    (if algo
+        (http-protocol:encode-content-coding algo buf)
+        (http-protocol:encode-content-coding :identity buf))))
 
 (defun decompress-payload (algorithm octets)
-  (let ((buf (%as-octets octets)))
-    (etypecase algorithm
-      (null buf)
-      (keyword
-       (ecase algorithm
-         (:identity buf)
-         (:gzip (chipz:decompress nil 'chipz:gzip buf))
-         (:deflate
-          (handler-case
-              (chipz:decompress nil 'chipz:zlib buf)
-            (error ()
-              (chipz:decompress nil 'chipz:deflate buf))))))
-      (string
+  (let ((c (parse-grpc-encoding algorithm))
+        (buf (%as-octets octets)))
+    (cond
+      ((or (null c) (eq c :identity))
+       (http-protocol:decode-content-coding :identity buf))
+      ((http-protocol:content-coding-supported-p c)
+       (handler-case
+           (http-protocol:decode-content-coding c buf)
+         (http-protocol:unsupported-content-coding ()
+           (error 'grpc-protocol:grpc-error
+                  :status :unimplemented
+                  :message (format nil "unsupported grpc-encoding ~A" algorithm)))
+         (error (e)
+           (error 'grpc-protocol:grpc-error
+                  :status :internal
+                  :message (format nil "grpc decompress ~S failed: ~A" c e)
+                  :details e))))
+      (t
        (error 'grpc-protocol:grpc-error
               :status :unimplemented
               :message (format nil "unsupported grpc-encoding ~A" algorithm))))))

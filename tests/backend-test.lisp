@@ -198,7 +198,7 @@
 (deftest unary-unknown-encoding-errors
   (let* ((headers (%ok-headers))
          (gz (grpc-backend-http2:compress-payload :gzip #(1))))
-    (setf (gethash "grpc-encoding" headers) "br")
+    (setf (gethash "grpc-encoding" headers) "lz4")
     (let* ((http (make-instance 'mock-http-backend
                                 :response-headers headers
                                 :response-body (grpc-backend-http2:frame-message gz t)))
@@ -214,7 +214,7 @@
                               :response-body (grpc-backend-http2:frame-message #(1))))
          (ch (grpc-protocol:grpc-connect
               "example.test:443" :credentials :ssl
-              :metadata (list :http-backend http :compression :br))))
+              :metadata (list :http-backend http :compression :lz4))))
     (ok (signals (grpc-protocol:grpc-call ch "/pkg.Svc/Ping" #(1))
                  'grpc-protocol:grpc-error))))
 

@@ -18,6 +18,22 @@ Part of [cl-stack](https://github.com/egao1980/cl-stack) agent-wire
     (grpc-protocol:grpc-close ch)))
 ```
 
+0.4.0:
+
+- **TLS accept loop** (`grpc-serve`): unary + server-stream + client-stream +
+  interleaved bidi over [`http-server-backend-http2`](https://github.com/egao1980/http-server-backend-http2).
+  Register `grpc-method-handler`s; accept-side streams speak `grpc-send` /
+  `grpc-recv`. Requires `:ssl :cert` / `:key` (or metadata `:ssl-cert` /
+  `:ssl-key`). **No h2c / `:insecure`.**
+
+```lisp
+(grpc-protocol:grpc-serve
+ (list (grpc-protocol:make-grpc-method-handler
+        "/echo.Echo/Ping" (lambda (req stream) (declare (ignore stream)) req)))
+ :credentials (list :ssl :cert #p"cert.pem" :key #p"key.pem")
+ :port 8443)
+```
+
 0.3.1:
 
 - **Compressed frames:** `:compression :gzip` / `:deflate` on `grpc-connect` /

@@ -81,6 +81,17 @@
       (apply #'concatenate '(vector (unsigned-byte 8))
              (mapcar #'frame-message payloads))))
 
+(defun grpc-status-code (status)
+  "Keyword / integer / digit string → grpc-status wire integer (0..16), else 2."
+  (cond
+    ((integerp status)
+     (if (<= 0 status 16) status 2))
+    ((keywordp status)
+     (or (position status *grpc-status-names* :test #'eq) 2))
+    ((stringp status)
+     (grpc-status-code (grpc-status-keyword status)))
+    (t 2)))
+
 (defun grpc-status-keyword (value)
   "Coerce a grpc-status header/trailer (integer, digit string, or name) to a keyword."
   (cond

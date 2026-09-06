@@ -305,6 +305,50 @@
     (ok (equalp (grpc-backend-http2:concat-frames '(#(1) #(2)))
                 (%slurp-request-pipe (mock-last-request http))))))
 
+(deftest grpc-status-code-maps
+  (ok (eql 0 (grpc-backend-http2:grpc-status-code :ok)))
+  (ok (eql 12 (grpc-backend-http2:grpc-status-code :unimplemented)))
+  (ok (eql 2 (grpc-backend-http2:grpc-status-code :nope)))
+  (ok (eql 0 (grpc-backend-http2:grpc-status-code 0))))
+
+(deftest serve-insecure-unimplemented
+  (ok (signals (grpc-protocol:grpc-serve '() :credentials :insecure)
+               'grpc-protocol:grpc-error)))
+
+(deftest serve-needs-tls-files
+  (ok (signals (grpc-protocol:grpc-serve '() :credentials :ssl)
+               'grpc-protocol:grpc-error))
+  (ok (signals (grpc-protocol:grpc-serve
+                '()
+                :credentials '(:ssl :cert "/no/such/cert.pem"
+                               :key "/no/such/key.pem"))
+               'grpc-protocol:grpc-error)))
+
+(deftest serve-finds-registered-kinds
+  (let ((handlers
+          (list (grpc-protocol:make-grpc-method-handler
+                 "/echo.Echo/Ping" #'identity :kind :unary)
+                (grpc-protocol:make-grpc-method-handler
+                 "/echo.Echo/Watch"
+                 (lambda (req stream) (declare (ignore req stream)))
+                 :kind :server-stream)
+                (grpc-protocol:make-grpc-method-handler
+                 "/echo.Echo/Chat"
+                 (lambda (stream) (declare (ignore stream)))
+                 :kind :bidi))))
+    (ok (eq :unary
+            (grpc-protocol:grpc-method-handler-kind
+             (grpc-protocol:find-grpc-method-handler
+              handlers "/echo.Echo/Ping"))))
+    (ok (eq :server-stream
+            (grpc-protocol:grpc-method-handler-kind
+             (grpc-protocol:find-grpc-method-handler
+              handlers "/echo.Echo/Watch"))))
+    (ok (eq :bidi
+            (grpc-protocol:grpc-method-handler-kind
+             (grpc-protocol:find-grpc-method-handler
+              handlers "/echo.Echo/Chat"))))))
+
 (deftest bidi-send-after-recv
   "Interleaved send after first recv (http-body-pipe, not queued flush)."
   (let* ((http (make-instance 'mock-http-backend

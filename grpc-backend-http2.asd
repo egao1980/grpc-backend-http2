@@ -9,7 +9,7 @@
                "http-server-protocol"
                "http-server-backend-http2"
                "bordeaux-threads" "uiop")
-  :properties (:cl-repo (:ci (:with ("dissect" "http-server-backend-http2"))))
+  :properties (:cl-repo (:ci (:with ("dissect" "http-server-backend-http2" "http2"))))
   :serial t
   :pathname "src"
   :components ((:file "package")

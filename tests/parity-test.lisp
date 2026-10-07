@@ -225,5 +225,9 @@
                                    (note-failure "Chat" e))))))
                         (grpc-protocol:grpc-close ch))))))
             (when proc
-              (ignore-errors (uiop:terminate-process proc))
-              (ignore-errors (uiop:wait-process proc)))))))))
+              (ignore-errors (uiop:terminate-process proc :urgent t))
+              ;; Windows wait-process does not return after the grpcio
+              ;; server ignores a soft kill; the job then hits the cap
+              ;; even though every assertion already passed.
+              (unless (uiop:os-windows-p)
+                (ignore-errors (uiop:wait-process proc)))))))))

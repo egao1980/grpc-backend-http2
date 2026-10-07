@@ -230,4 +230,4 @@
               ;; server ignores a soft kill; the job then hits the cap
               ;; even though every assertion already passed.
               (unless (uiop:os-windows-p)
-                (ignore-errors (uiop:wait-process proc)))))))))
+                (ignore-errors (uiop:wait-process proc))))))))))

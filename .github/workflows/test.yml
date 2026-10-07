@@ -13,9 +13,11 @@ permissions:
 
 jobs:
   test:
+    timeout-minutes: 45
     uses: egao1980/cl-repository/.github/workflows/test-system.yml@main
 
   grpcio:
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

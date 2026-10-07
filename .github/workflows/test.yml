@@ -13,7 +13,8 @@ permissions:
 
 jobs:
   test:
-    timeout-minutes: 45
+    # timeout-minutes is not a legal keyword beside `uses:`; it fails the
+    # workflow at startup (0 jobs). The grpcio job below carries the cap.
     uses: egao1980/cl-repository/.github/workflows/test-system.yml@main
 
   grpcio:

@@ -96,19 +96,21 @@
   (let ((done nil)
         (val nil)
         (err nil))
-    (let ((th (bordeaux-threads:make-thread
-               (lambda ()
-                 (handler-case (setf val (funcall thunk) done t)
-                   (error (e) (setf err e done t))))
-               :name "grpc-parity-timeout")))
-      (loop repeat (max 1 (round (* seconds 20)))
-            until done
-            do (sleep 0.05))
+    (bordeaux-threads:make-thread
+     (lambda ()
+       (handler-case (setf val (funcall thunk) done t)
+         (error (e) (setf err e done t))))
+     :name "grpc-parity-timeout")
+    (loop repeat (max 1 (round (* seconds 20)))
+          until done
+          do (sleep 0.05))
       (unless done
-        (ignore-errors (bordeaux-threads:destroy-thread th))
+        ;; SBCL on Windows waits for the thread to leave a blocking connect.
+        ;; destroy-thread then sits until the Actions job cap. Leave the
+        ;; worker; the caller must not start another call on this loop.
         (error "grpcio parity timed out after ~A s" seconds))
       (when err (error err))
-      val)))
+      val))
 
 (deftest grpcio-parity-live
   "Lisp unary / server-stream / interleaved bidi vs grpcio. GRPC_PARITY_PEERS=1."
@@ -151,13 +153,19 @@
                     (let* ((http (%bind-async-maker))
                            (client (http-protocol:make-http-client
                                     http :http-version :http/2 :verify nil))
-                           (target (format nil "localhost:~D" port))
+                           ;; 127.0.0.1, not localhost: server.py binds v4 only, and
+                           ;; Windows resolves localhost to ::1 first.
+                           (target (format nil "127.0.0.1:~D" port))
                            (ch (grpc-protocol:grpc-connect
                                 target :credentials :ssl
                                 :metadata (list :http-backend http
                                                 :http-client client))))
                       (unwind-protect
-                           (progn
+                           (block parity-cases
+                             (flet ((note-failure (label e)
+                                      (ok nil (format nil "~A: ~A" label e))
+                                      (when (search "timed out" (princ-to-string e))
+                                        (return-from parity-cases nil))))
                              (testing "unary Ping"
                                (handler-case
                                    (let ((out (%call-timeout
@@ -169,7 +177,7 @@
                                                   :timeout 5)))))
                                      (ok (equalp #(9 8 7) (%pb-decode-bytes out))))
                                  (error (e)
-                                   (ok nil (format nil "unary Ping: ~A" e)))))
+                                   (note-failure "unary Ping" e)))))
                              (testing "server-stream Watch"
                                (handler-case
                                    (let ((msgs (%call-timeout
@@ -191,7 +199,7 @@
                                      (ok (equalp #(9 2) (%pb-decode-bytes (third msgs))))
                                      (ok (eq :eof (fourth msgs))))
                                  (error (e)
-                                   (ok nil (format nil "Watch: ~A" e)))))
+                                   (note-failure "Watch" e))))
                              (testing "interleaved bidi Chat"
                                (handler-case
                                    (let ((msgs (%call-timeout
@@ -214,8 +222,12 @@
                                      (ok (equalp #(66) (%pb-decode-bytes (second msgs))))
                                      (ok (eq :eof (third msgs))))
                                  (error (e)
-                                   (ok nil (format nil "Chat: ~A" e))))))
+                                   (note-failure "Chat" e))))))
                         (grpc-protocol:grpc-close ch))))))
             (when proc
-              (ignore-errors (uiop:terminate-process proc))
-              (ignore-errors (uiop:wait-process proc))))))))))
+              (ignore-errors (uiop:terminate-process proc :urgent t))
+              ;; Windows wait-process does not return after the grpcio
+              ;; server ignores a soft kill; the job then hits the cap
+              ;; even though every assertion already passed.
+              (unless (uiop:os-windows-p)
+                (ignore-errors (uiop:wait-process proc))))))))))

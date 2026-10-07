@@ -357,10 +357,14 @@
 (defun %stop-loop (stream)
   (when (http2-stream-owns-loop-p stream)
     (let ((stop (%event-sym '#:stop))
+          (wake-call (%event-sym '#:wake-call))
           (eb (http2-stream-event-backend stream))
           (el (http2-stream-event-loop stream)))
       (when (and stop eb el)
-        (ignore-errors (funcall stop eb el))))
+        (ignore-errors
+         (if (and wake-call (fboundp wake-call))
+             (funcall wake-call eb el (lambda () (funcall stop eb el)))
+             (funcall stop eb el)))))
     (let ((th (http2-stream-loop-thread stream)))
       (when (and th (thread-alive-p th))
         (ignore-errors (join-thread th))))
@@ -378,6 +382,18 @@
           (funcall fn))
         (funcall fn))))
 
+(defun %call-on-loop (stream fn)
+  "Run FN on the loop thread when STREAM owns a pump thread (libuv/libev
+   handles must be created on the thread blocked in RUN; from here they would
+   neither be seen nor wake it). Errors are reported through FN's own callbacks."
+  (let ((wake-call (%event-sym '#:wake-call)))
+    (if (and (http2-stream-owns-loop-p stream) wake-call (fboundp wake-call))
+        (funcall wake-call
+                 (http2-stream-event-backend stream)
+                 (http2-stream-event-loop stream)
+                 (lambda () (%with-stream-event-context stream fn)))
+        (%with-stream-event-context stream fn))))
+
 (defun %start-http (stream)
   "Open POST with a body pipe via SEND-ASYNC (blocking SEND slurps :want-stream)."
   (when (http2-stream-http-started-p stream)
@@ -390,32 +406,37 @@
         (deadline (+ (get-internal-real-time)
                      (* 30 internal-time-units-per-second))))
     (%ensure-loop stream)
-    (%with-stream-event-context
+    (%call-on-loop
      stream
      (lambda ()
-       (let ((req (http-protocol:make-http-request
-                   :method :post
-                   :url (http2-stream-url stream)
-                   :headers (%grpc-request-headers (http2-stream-metadata stream)
-                                                   (http2-stream-timeout stream)
-                                                   :compression
-                                                   (%stream-request-compression stream))
-                   :content pipe
-                   :http-version :http/2
-                   :want-stream t
-                   :force-binary t
-                   :accept-encoding nil
-                   :decompress nil)))
-         (http-protocol:send-async
-          (http2-stream-http-backend stream)
-          (http2-stream-http-client stream)
-          req
-          :callback (lambda (r)
-                      (with-lock-held (lock)
-                        (setf res r done t)))
-          :error-callback (lambda (e)
-                            (with-lock-held (lock)
-                              (setf err e done t)))))))
+       (handler-case
+           (let ((req (http-protocol:make-http-request
+                       :method :post
+                       :url (http2-stream-url stream)
+                       :headers (%grpc-request-headers (http2-stream-metadata stream)
+                                                       (http2-stream-timeout stream)
+                                                       :compression
+                                                       (%stream-request-compression stream))
+                       :content pipe
+                       :http-version :http/2
+                       :want-stream t
+                       :force-binary t
+                       :accept-encoding nil
+                       :decompress nil)))
+             (http-protocol:send-async
+              (http2-stream-http-backend stream)
+              (http2-stream-http-client stream)
+              req
+              :callback (lambda (r)
+                          (with-lock-held (lock)
+                            (setf res r done t)))
+              :error-callback (lambda (e)
+                                (with-lock-held (lock)
+                                  (setf err e done t)))))
+         ;; Raised on the loop thread when dispatched there: hand it back.
+         (error (e)
+           (with-lock-held (lock)
+             (setf err e done t))))))
     (loop until (with-lock-held (lock) done)
           do (when (> (get-internal-real-time) deadline)
                (%stop-loop stream)

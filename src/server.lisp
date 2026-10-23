@@ -93,15 +93,31 @@
     (setf (slot-value h2 'http-server-backend-http2::connect-dispatched-p) t))
   t)
 
-(defun %wait-h2 (h2)
-  (let ((lock (and (slot-exists-p h2 'accept-lock) (slot-value h2 'accept-lock)))
-        (cv (and (slot-exists-p h2 'accept-cv) (slot-value h2 'accept-cv))))
-    (if (and lock cv)
-        (with-lock-held (lock)
-          (unless (and (slot-exists-p h2 'peer-ended-p)
-                       (slot-value h2 'peer-ended-p))
-            (condition-wait cv lock :timeout 0.25)))
-        (sleep 0.01))))
+(defun %read-frame-fn ()
+  "READ-FRAME lives in HTTP2/STREAM-OVERLAY; some builds also export it from HTTP2/CORE."
+  (or (%optional-core-sym '#:read-frame)
+      (let ((pkg (find-package :http2/stream-overlay)))
+        (and pkg (find-symbol "READ-FRAME" pkg)))))
+
+(defun %pump-h2 (h2)
+  "Read one HTTP/2 frame on H2's connection, on this thread.
+
+http2's threaded server assumes a single writer: a DATA frame is queued as a
+header then a payload, and cl+ssl cannot SSL_read and SSL_write the same
+object at once (Windows reports bad record mac; other peers see a torn frame
+on the next RPC of a reused connection). The accept handler therefore runs on
+the connection thread and pulls further frames itself instead of spawning a
+writer thread."
+  (let ((conn (ignore-errors (%h2-connection h2)))
+        (read-frame (%read-frame-fn)))
+    (cond
+      ((and conn read-frame (fboundp read-frame))
+       (handler-case
+           (funcall read-frame conn)
+         (end-of-file ()
+           (when (slot-exists-p h2 'peer-ended-p)
+             (setf (slot-value h2 'peer-ended-p) t)))))
+      (t (sleep 0.01)))))
 
 (defun %peer-ended-p (h2)
   (and (slot-exists-p h2 'peer-ended-p)
@@ -162,20 +178,20 @@
                                      (grpc-http2-connection-accept connection))))
                (%mark-dispatched stream)
                (let ((accept (grpc-http2-connection-accept connection)))
-                 (make-thread (lambda ()
-                                (handler-case (funcall accept stream)
-                                  (error (e)
-                                    (ignore-errors
-                                      (let ((st (make-instance
-                                                 'http2-grpc-accept-stream
-                                                 :channel nil
-                                                 :method (%h2-path stream)
-                                                 :h2 stream)))
-                                        (setf (http2-accept-status st) :internal
-                                              (http2-accept-status-message st)
-                                              (princ-to-string e))
-                                        (%finish-accept st))))))
-                              :name "grpc-accept")))))
+                 ;; Same thread as PROCESS-PENDING-FRAMES. A second thread
+                 ;; writing the response races the reader (see %PUMP-H2).
+                 (handler-case (funcall accept stream)
+                   (error (e)
+                     (ignore-errors
+                       (let ((st (make-instance
+                                  'http2-grpc-accept-stream
+                                  :channel nil
+                                  :method (%h2-path stream)
+                                  :h2 stream)))
+                         (setf (http2-accept-status st) :internal
+                               (http2-accept-status-message st)
+                               (princ-to-string e))
+                         (%finish-accept st)))))))))
     (eval `(defmethod ,peer-ends :around ((stream grpc-http2-stream))
              (when (slot-exists-p stream 'peer-ended-p)
                (setf (slot-value stream 'peer-ended-p) t))
@@ -245,7 +261,7 @@
               (setf (http2-accept-body-pos stream) next2)
               (return (%decode-accept-payload payload2 compressed2 encoding))))
           (return :eof))
-        (%wait-h2 h2)))))
+        (%pump-h2 h2)))))
 
 (defmethod grpc-protocol:grpc-send ((stream http2-grpc-accept-stream) message &key end)
   (when (or (grpc-protocol:grpc-stream-closed-p stream)

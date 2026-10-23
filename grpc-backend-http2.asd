@@ -1,5 +1,5 @@
 (defsystem "grpc-backend-http2"
-  :version "0.4.1"
+  :version "0.4.2"
   :description "HTTP/2 (http-protocol) backend for grpc-protocol — client + TLS accept loop"
   :author "egao1980"
   :license "MIT"
